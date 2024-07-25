@@ -1,3 +1,13 @@
+Для работы с гитом
+git init
+git remote add origin "got@git"
+git status
+git add .
+git commit -am "text"
+git push
+
+
+Для оформления readme
 # H1 — заголовок первого уровня, самый большой
 ## H2 — заголовок второго уровня, поменьше
 ### H3
