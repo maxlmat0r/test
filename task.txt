@@ -1,1 +1,60 @@
-wer
+
+#!/bin/bash
+#
+#
+# Локальный сбор метрики "Process schedule stats CPU Waiting (MAX)" напрямую
+# из первоисточника /proc/schedstat, без Prometheus/node_exporter.
+#
+# Аналог PromQL-запроса:
+#   max(irate(node_schedstat_waiting_seconds_total{instance=~"$node"}[$interval])) by (instance)
+#
+# Как это устроено:
+#   - node_exporter берёт wait_time из /proc/schedstat: строка "cpuN f1 f2 ... f7 run_time wait_time timeslices"
+#     (9 полей после имени CPU; wait_time — 8-е из них, в наносекундах).
+#   - node_schedstat_waiting_seconds_total = wait_time / 1e9 (счётчик в секундах).
+#   - irate() = (current - previous) / (time_current - time_previous) по двум последним точкам.
+#   - max(...) by (instance) = берём максимум среди всех CPU хоста.
+#
+# Скрипт делает ровно то же самое локально: на каждой итерации считает дельту
+# wait_time по каждому cpuN между двумя соседними снятиями, делит на реальный
+# прошедший интервал времени, и берёт максимум по всем CPU.
+#
+# Запуск:
+#   chmod +x cpuwait.sh
+#   ./cpuwait.sh
+#   (или в фоне: nohup ./cpuwait.sh > /tmp/cpuwait.log 2>&1 &)
+#
+# Результат: /tmp/cpuwait.txt
+#
+
+set -uo pipefail
+
+OUTFILE="/tmp/cpuwait.txt"
+DURATION_SEC=$((30 * 60))   # 30 минут
+INTERVAL_SEC=5             # интервал снятия метрики
+SCHEDSTAT="/proc/schedstat"
+
+if [ ! -r "$SCHEDSTAT" ]; then
+    echo "Ошибка: $SCHEDSTAT недоступен для чтения" >&2
+    exit 1
+fi
+
+: > "$OUTFILE"
+
+# --- Функция чтения текущего wait_time (нс) по каждому CPU из /proc/schedstat ---
+# Формат строки: cpu0 <f1> <f2> <f3> <f4> <f5> <f6> <run_time> <wait_time> <timeslices>
+# awk: $1=cpuN, $9=wait_time (9-е поле после имени CPU в столбцах $2..$10)
+read_schedstat() {
+    awk '/^cpu[0-9]+ / {print $1, $9}' "$SCHEDSTAT"
+}
+
+# --- Форматирование значения: мс если < 1с, иначе секунды ---
+format_value() {
+    local val="$1"
+    awk -v v="$val" 'BEGIN {
+        if (v < 1) {
+            printf "%.2f ms", v * 1000
+        } else {
+            printf "%.3f s", v
+        }
+    }'
