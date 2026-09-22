@@ -58,3 +58,75 @@ format_value() {
             printf "%.3f s", v
         }
     }'
+}
+
+# --- Сравнение двух float-чисел (a > b -> 1, иначе 0) ---
+is_greater() {
+    awk -v a="$1" -v b="$2" 'BEGIN{ print (a > b) ? 1 : 0 }'
+}
+
+echo "Сбор метрики CPU Waiting запущен. Интервал: ${INTERVAL_SEC}s, длительность: $((DURATION_SEC/60)) мин."
+echo "Отчёт: $OUTFILE"
+
+# --- Начальный снимок ---
+declare -A prev_wait
+while read -r cpu wait_ns; do
+    prev_wait["$cpu"]="$wait_ns"
+done < <(read_schedstat)
+
+prev_time=$(date +%s.%N)
+end_time=$(( $(date +%s) + DURATION_SEC ))
+
+min_val=""
+max_val=""
+
+while [ "$(date +%s)" -lt "$end_time" ]; do
+    sleep "$INTERVAL_SEC"
+
+    curr_time=$(date +%s.%N)
+    dt=$(awk -v a="$curr_time" -v b="$prev_time" 'BEGIN{ printf "%.6f", a-b }')
+
+    max_rate="0"
+    while read -r cpu wait_ns; do
+        prev="${prev_wait[$cpu]:-$wait_ns}"
+        delta_ns=$(( wait_ns - prev ))
+
+        # защита от отрицательной дельты (переполнение счётчика/рестарт) — считаем как 0
+        if [ "$delta_ns" -lt 0 ]; then
+            delta_ns=0
+        fi
+
+        rate=$(awk -v d="$delta_ns" -v t="$dt" 'BEGIN{
+            if (t > 0) { printf "%.6f", (d / 1000000000) / t } else { print 0 }
+        }')
+
+        if [ "$(is_greater "$rate" "$max_rate")" -eq 1 ]; then
+            max_rate="$rate"
+        fi
+
+        prev_wait["$cpu"]="$wait_ns"
+    done < <(read_schedstat)
+
+    prev_time="$curr_time"
+
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    formatted=$(format_value "$max_rate")
+    echo "${ts} - ${formatted}" >> "$OUTFILE"
+
+    # обновление min/max
+    if [ -z "$min_val" ] || [ "$(is_greater "$min_val" "$max_rate")" -eq 1 ]; then
+        min_val="$max_rate"
+    fi
+    if [ -z "$max_val" ] || [ "$(is_greater "$max_rate" "$max_val")" -eq 1 ]; then
+        max_val="$max_rate"
+    fi
+done
+
+{
+    echo ""
+    echo "=== Итог за $((DURATION_SEC/60)) минут (интервал ${INTERVAL_SEC}s) ==="
+    echo "Min: $(format_value "$min_val")"
+    echo "Max: $(format_value "$max_val")"
+} >> "$OUTFILE"
+
+echo "Готово. Отчёт сохранён в $OUTFILE"
